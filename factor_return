@@ -1,0 +1,279 @@
+import os
+from bqwidgets import NameValueTable,DatePicker
+import ipywidgets as widgets
+from IPython.display import display
+import bqviz as bqv
+import pandas as pd
+from datetime import date,datetime,timedelta
+from bqviz.base_plots import VBox,HBox,LinePlot,BB_CLRS,Layout,BQV_LAYOUTS
+
+date_format='%m/%d/%Y'
+input_from = DatePicker(description='From',
+                       value=(date.today()-timedelta(days=365*3)).strftime(date_format),
+                       min_date=(date.today()-timedelta(days=365*5)).strftime(date_format),
+                       max_date=(date.today()-timedelta(days=7)).strftime(date_format),
+                       date_format=date_format)
+input_to = DatePicker(description='To',
+                      value=date(1900,1,1).strftime(date_format),
+                     min_date=(date.today()-timedelta(days=365*5-7)).strftime(date_format),
+                     date_format=date_format)
+dates_box=widgets.HBox([input_from,input_to])
+
+data_btn=widgets.Button(description='Reload Data')
+data_btn.layout.width = '350px'
+period_btns=[widgets.Button(description=str(m) + ' M') for m in [1,2,3,6,12,24,36,60]]
+period_btns.append(widgets.Button(description='Max'))
+message_area=widgets.Label(' ')
+message_area.layout.width = '350px'
+period_box=widgets.HBox(period_btns + [widgets.Label(' '),data_btn ,message_area])
+period_box.layout.width = '775px'
+main_box = widgets.VBox([ dates_box , widgets.Label(' ')  ,period_box ])
+
+
+#横向きに並べたかったので、GridPlotを継承したクラスを自作した
+class HorizontalGridPlot(bqv.GridPlot):
+
+    """ Returns a grid containing a plot for each column of the provided
+    dataframe.
+
+    Parameters
+    ----------
+    df: Pandas dataframe
+        The dataframe to be plotted.
+    plots: object reference or list of references. (default='LinePlot')
+        The provided reference must be an object that is able to be displayed
+        in the GridPlot. If one reference is given, all plots will default to
+        that type. If a list of plots is provided, they will be assigned to
+        each column in the dataframe by index number.
+    cols: Integer (default=3)
+        The number of columns for the results to be displayed in.
+    colors: list of strings (default=BB_CLRS)
+        Colors to pass down to the subfigures. Only the first index is used.
+    heights: list of strings (default=None) (example: '75%' or '200px')
+        A list of heights for each column.
+    widths: list of strings (default=None) (example: '75%' or '200px')
+        A list of widths for each column.
+    tick_format: string (default=None)
+        The tick format for the Y axis. Example: '0.2f'
+
+    """
+
+    def __init__(self, df, plots=LinePlot, cols=3, colors=BB_CLRS,
+                 widths=None, tick_format=None,
+                 convert_dates=False, heights=None):
+
+        self._colors = colors
+        self._cols = cols
+        self._num_data_cols = len(df.columns)
+        self._num_data_rows = len(df)
+        self._convert_dates = convert_dates
+        self._heights = heights
+        self._is_subplot = False
+        self._figures = []
+        self._legenddisplay = None
+        self._tick_format = tick_format
+        self._send_log = True
+        self._widths = widths
+
+        self._plots = plots
+
+        self._make_figure(df, plots)
+
+        # Validate heights/widths
+        self._validate_grid_settings()
+
+        # Send log
+        self._log('bqviz.GridPlot')
+
+    def _divide_list(self, lst, col=1):
+        length = len(lst)
+        return [lst[i*col: (i+1)*col] for i in range(int(length/col)+1)]
+
+    def show(self):
+        """Create Boxes and display plots"""
+
+        if self._cols == 1:
+            return VBox([x.show() for x in self._figures])
+
+        else:
+            # Divide plot list into columns
+            rows = self._divide_list([x.show() for x in self._figures], self._cols)
+            hboxes = [HBox(children=x,
+                           layout=Layout(width='{}%'.format((100*len(x) // self._cols)))) for x in rows]
+
+            if self._widths:
+                for i in range(len(self._widths)):
+                    # Set width on BQPlot figure
+                    vboxes[i].layout.width = self._widths[i]
+
+            if self._heights:
+                for i in range(len(self._heights)):
+                    for box in vboxes:
+                        # Check if box exists (every column may not have same
+                        # number of boxes)
+                        if i < len(box.children):
+                            # Set height on BQPlot figure
+                            box.children[i].layout.height = self._heights[i]
+
+            return VBox(hboxes, layout=BQV_LAYOUTS['full_width'])
+
+
+def set_date_range(b):
+
+    print('set_date_range')
+
+    if b.description!='Max':
+        m=int(b.description.split(' ')[0])
+    else:
+        m='Max'
+
+    latest_date=result.index[-1]
+    input_to.value=(latest_date).strftime(date_format)
+
+    if m==1:
+        input_from.value=(latest_date-timedelta(days=31)).strftime(date_format)
+    elif m==2:
+        input_from.value=(latest_date-timedelta(days=61)).strftime(date_format)
+    elif m==3:
+        input_from.value=(latest_date-timedelta(days=92)).strftime(date_format)
+    elif m==6:
+        input_from.value=(latest_date-timedelta(days=183)).strftime(date_format)
+    elif m==12:
+        input_from.value=(latest_date-timedelta(days=365)).strftime(date_format)
+    elif m==24:
+        input_from.value=(latest_date-timedelta(days=365*2)).strftime(date_format)
+    elif m==36:
+        input_from.value=(latest_date-timedelta(days=365*3+1)).strftime(date_format)
+    elif m==60:
+        input_from.value=(latest_date-timedelta(days=365*5+1)).strftime(date_format)
+    elif m=='Max':
+        input_from.value=(industry_alpha.index[0]).strftime(date_format)
+    else:
+        pass
+
+def update_charts():
+
+    date_from_chart=datetime.strptime(input_from.value,date_format).date()
+    date_to_chart=datetime.strptime(input_to.value,date_format).date()
+    date_range_sec=[date_from_chart <= d.date() <= date_to_chart for d in result.index]
+
+    cum_factor_rtns=result.loc[date_range_sec].cumsum()
+    cum_factor_rtns.index=cum_factor_rtns.index.map(lambda d:d.date().strftime('%d-%b-%y'))
+
+    #グラフの更新
+    charts=widgets.Box([HorizontalGridPlot(cum_factor_rtns,cols=4).show()])
+    main_box.children = [dates_box , widgets.Label(' ')  ,period_box  , charts]
+
+def on_change(change):
+    if change['type'] == 'change' and change['name'] == 'value':
+
+        try:
+            update_charts()
+        except:
+            pass
+
+def update_data(_):
+
+    message_area.value='Loading.....'
+
+    #メインの処理開始
+    global mybbg,result
+    mybbg=bbgRequest()
+
+    file_name="historical_members.csv"
+    if os.path.exists(file_name):
+        h=pd.read_csv(file_name,index_col=0)
+        h.index=pd.DatetimeIndex(h.index)
+        daterange=pd.date_range(start=(h.index[-1].date()+timedelta(days=1)).strftime('%m/%d/%Y'),end='today',freq='M')
+    else:
+        h=pd.DataFrame()
+        print('creating new file....')
+        daterange=pd.date_range(start='09/15/2009',end='today',freq='M')
+
+    historical_members=[]
+
+    for d in daterange:
+        end_date=d.strftime('%Y%m%d')
+        mybbg.sendReferenceDataRequest('TPX500 Index','INDX_MWEIGHT_HIST',{'END_DATE_OVERRIDE':end_date})
+        tickers_and_weights= mybbg.referenceDataResults.data[-1][-1]
+        members=[tickers_and_weights[i] for i in range(0,len(tickers_and_weights),2)]
+        historical_members.append(pd.Series(1,index=members))
+
+    if len(historical_members)>0:
+        h2=pd.concat(historical_members,axis=1).T
+        h2.index=pd.DatetimeIndex(daterange)
+        h=h.append(h2)
+        h.to_csv(file_name)
+
+    #bloomberg問い合わせ用
+    h.columns=h.columns+' Equity'
+
+    #期間
+    date_from_data=(date.today()-timedelta(days=365*5))
+    date_to_data=date.today()
+
+    #リターン取得
+    date_from=date(2005,12,30)
+    date_to=date.today()
+    mybbg.sendHistoricalDataRequest(np.append(h.columns.values,'TPX Index'),'DAY_TO_DAY_TOT_RETURN_GROSS_DVDS',start=date_from,end=date_to)
+    rtns=mybbg.historicalDataResults.as_frame().pivot(index='date',columns='security',values='value').fillna(0)
+    rtns=np.log(rtns/100+1)
+    rtns.index=pd.DatetimeIndex(rtns.index)
+
+    mom1m=rtns.ewm(halflife=20).mean().iloc[:,:-1]
+    mom3m=rtns.ewm(halflife=61).mean().iloc[:,:-1]
+    mom6m=rtns.ewm(halflife=122).mean().iloc[:,:-1]
+    mom12m=rtns.ewm(halflife=245).mean().iloc[:,:-1]
+    mom24m=rtns.ewm(halflife=490).mean().iloc[:,:-1]
+
+    corr=rtns.ewm(halflife=490).corr(rtns['TPX Index'])
+    std=rtns.ewm(halflife=85).std()
+    beta_raw=(corr*std).divide(std['TPX Index'],axis=0)
+    beta=(beta_raw*2+1).iloc[:,:-1]/3
+    #capm_alpha=np.exp(rtns)-np.exp(beta.shift(1).multiply(rtns['TPX Index'],axis=0))
+    #capm_alpha=capm_alpha.iloc[:,:-1]
+
+    #ファクター値取得
+    factor_names=['PX_TO_BOOK_RATIO','SALES_3YR_AVG_GROWTH','RETURN_COM_EQY','CUR_MKT_CAP','BB_1YR_DEFAULT_PROB','BS_PERCENT_OF_FOREIGN_OWNERSHIP']
+    mybbg.historicalDataResults.clear()
+    mybbg.sendHistoricalDataRequest(h.columns.values,factor_names,start=date_from,end=date_to)
+    historical_data=mybbg.historicalDataResults.as_frame()
+
+    factors=[historical_data.loc[historical_data.field==n].pivot(index='date',columns='security',values='value').fillna(method='ffill') for n in factor_names]
+    factors+=[mom1m,mom3m,mom6m,mom12m,mom24m,corr,std,beta]
+    factor_names+=['hl_01m','hl_03m','hl_06m','hl_12m','hl_24m','correlation','std_deviation','beta']
+
+    result=pd.DataFrame(columns=factor_names)
+
+    for n,f in zip(factor_names,factors):
+
+        temp=f.rank(axis=1)
+        temp2=temp.subtract(temp.mean(axis=1),axis=0)
+        weight=(temp2.divide(temp2.abs().sum(axis=1),axis=0)*2)
+        long=weight[weight>=0]
+        short=weight[weight<0]
+        pct_rtn=np.exp(rtns)-1
+        beta_short=short.multiply(beta).sum(axis=1).abs()
+        short=short.divide(beta_short,axis=0).fillna(0)
+        beta_long=long.multiply(beta).sum(axis=1)
+        long=long.divide(beta_long,axis=0).fillna(0)
+        result[n]=(long+short).shift(1).multiply(pct_rtn).sum(axis=1)
+
+    last_date=(rtns.index[-1]).strftime(date_format)
+    if last_date==input_to.value:
+        update_charts()
+    else:
+        #on_change_datesに繋がる
+        input_to.value=last_date
+
+    message_area.value=' '
+
+update_data(0)
+input_to.observe(on_change)
+input_from.observe(on_change)
+data_btn.on_click(update_data)
+for b in period_btns:
+    b.on_click(set_date_range)
+
+display(main_box)
+update_charts()  
