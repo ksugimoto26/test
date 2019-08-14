@@ -1,0 +1,475 @@
+import blpapi
+import pandas as pd
+import numpy as np
+from datetime import date,datetime,timedelta
+
+BAR_DATA = blpapi.Name("barData")
+BAR_TICK_DATA = blpapi.Name("barTickData")
+OPEN = blpapi.Name("open")
+HIGH = blpapi.Name("high")
+LOW = blpapi.Name("low")
+CLOSE = blpapi.Name("close")
+VOLUME = blpapi.Name("volume")
+NUM_EVENTS = blpapi.Name("numEvents")
+TIME = blpapi.Name("time")
+RESPONSE_ERROR = blpapi.Name("responseError")
+SESSION_TERMINATED = blpapi.Name("SessionTerminated")
+CATEGORY = blpapi.Name("category")
+MESSAGE = blpapi.Name("message")
+SECURITY = blpapi.Name("security")
+SECURITY_DATA = blpapi.Name("securityData")
+FIELD_DATA = blpapi.Name("fieldData")
+
+class bbgRequest():
+
+    #Results
+    class bbgResultsClass():
+        def __init__(self):
+            self.data=[]
+        def as_frame(self):
+            return pd.DataFrame(self.data,columns=self.columns)
+        def clear(self):
+            self.data=[]
+
+    class intradayBarResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','time', 'open', 'high', 'low', 'close','numEvents', 'volume']
+
+    class referenceDataResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','field', 'value']
+
+    class historicalDataResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','date','field', 'value']
+
+    def __init__(self):
+
+        sessionOptions = blpapi.SessionOptions()
+        sessionOptions.setServerHost("localhost")
+        sessionOptions.setServerPort(8194)
+
+
+        # Create a Session
+        self.session = blpapi.Session(sessionOptions)
+        self.intradayBarResults=self.intradayBarResultsClass()
+        self.referenceDataResults=self.referenceDataResultsClass()
+        self.historicalDataResults=self.historicalDataResultsClass()
+
+        # Start a Session
+        if not self.session.start():
+            print("Failed to start session.")
+            return
+
+        try:
+            # Open service to get historical data from
+            if not self.session.openService("//blp/refdata"):
+                print("Failed to open //blp/refdata")
+                return
+
+            self.refDataService = self.session.getService("//blp/refdata")
+
+        except:
+            print("Failed to get service")
+            return
+
+    def __del__(self):
+
+        self.session.stop()
+
+    def clearAll(self):
+        self.referenceDataResults.clear()
+        self.intradayBarResults.clear()
+
+    def printErrorInfo(self,leadingStr, errorInfo):
+        print("%s%s (%s)" % (leadingStr, errorInfo.getElementAsString(CATEGORY),
+                             errorInfo.getElementAsString(MESSAGE)))
+
+    def processIntradayBarResponseEvent(self,event,sid):
+        for msg in event:
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            data = msg.getElement(BAR_DATA).getElement(BAR_TICK_DATA)
+
+            for bar in data.values():
+                time = bar.getElementAsDatetime(TIME)
+                open = bar.getElementAsFloat(OPEN)
+                high = bar.getElementAsFloat(HIGH)
+                low = bar.getElementAsFloat(LOW)
+                close = bar.getElementAsFloat(CLOSE)
+                numEvents = bar.getElementAsInteger(NUM_EVENTS)
+                volume = bar.getElementAsInteger(VOLUME)
+                self.intradayBarResults.data.append([sid,time, open, high, low, close,numEvents, volume])
+
+    def processSecurity(self,sid):
+
+        self.intradayBarRequest.set("security",sid)
+        #print("Sending Request:", self.intradayBarRequest.getElement(SECURITY).getValue())
+        self.session.sendRequest(self.intradayBarRequest)
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processIntradayBarResponseEvent(event,sid)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processIntradayBarResponseEvent(event,sid)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendIntradayBarRequest(self,sids,start=date.today(),end=datetime.today()+timedelta(days=1),event='TRADE',interval=1):
+
+        """
+        Parameters
+        ----------
+        start : times are in GMT.
+        end   : times are in GMT.
+        events: [TRADE, BID, ASK, BID_BEST, ASK_BEST, BEST_BID, BEST_ASK]
+        interval: int, between 1 and 1440 in minutes. If omitted, defaults to 1 minute
+        """
+
+        self.intradayBarRequest = self.refDataService.createRequest("IntradayBarRequest")
+
+        self.intradayBarRequest.set('eventType', event)
+        self.intradayBarRequest.set('startDateTime', start)
+        self.intradayBarRequest.set('endDateTime', end)
+        self.intradayBarRequest.set('interval', interval)
+
+        # Open service to get historical data from
+        if isinstance(sids,str):
+            self.processSecurity(sids)
+
+        else:
+            if hasattr(sids, "__iter__"):
+                for s in sids:
+                    self.processSecurity(s)
+
+    def processReferenceDataResponseEvent(self,event):
+        for msg in event:
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            securities=msg.getElement('securityData')
+            for s in securities.values():
+                ticker=s.getElementValue('security')
+                field_data=s.getElement('fieldData')
+                for f in self.referenceDataFields:
+                    field_value=[]
+                    if field_data.hasElement(f):
+
+                        for v in field_data.getElement(f).values():
+
+                            if isinstance(v,blpapi.element.Element):
+                                for e in v.elements():
+                                    for v2 in v.getElement(e.name()).values():
+                                        field_value.append(v2)
+                            else:
+                                field_value.append(v)
+
+                        if len(field_value)==1:
+                            field_value=field_value[0]
+
+                    else:
+                        field_value=np.nan
+
+                    self.referenceDataResults.data.append([ticker,f,field_value])
+
+    def referenceDataEventLoop(self):
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processReferenceDataResponseEvent(event)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processReferenceDataResponseEvent(event)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendReferenceDataRequest(self,sids,fields):
+
+        """
+        Parameters
+        ----------
+        sids  : bbg security identifier(s)
+        fields: bbg field name(s)
+        """
+
+        if isinstance(sids,str):
+            sids=[sids]
+        if isinstance(fields,str):
+            fields=[fields]
+
+        self.referenceDataFields=fields
+        self.referenceDataRequest = self.refDataService.createRequest("ReferenceDataRequest")
+
+        for item_name,item_value in zip(["securities","fields"],[sids,fields]):
+            for v in item_value:
+                self.referenceDataRequest.append(item_name,v)
+
+        self.session.sendRequest(self.referenceDataRequest)
+        self.referenceDataEventLoop()
+
+
+    def processHistoricalDataResponseEvent(self,event):
+
+        for msg in event:
+
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            security=msg.getElement('securityData')
+            ticker=security.getElementValue('security')
+            field_data=security.getElement('fieldData')
+            for row in field_data.values():
+                date=row.getElementValue('date')
+                for f in self.historicalDataFields:
+                    field_value=[]
+                    if row.hasElement(f):
+
+                        field_value=row.getElementValue(f)
+
+                    else:
+                        field_value=np.nan
+
+                    self.historicalDataResults.data.append([ticker,date,f,field_value])
+
+    def historicalDataEventLoop(self):
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processHistoricalDataResponseEvent(event)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processHistoricalDataResponseEvent(event)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendHistoricalDataRequest(self,sids,fields,start=date.today()-timedelta(days=365),end=date.today(),periodicity='DAILY'):
+
+        """
+        Parameters
+        ----------
+        sids  : bbg security identifier(s)
+        fields: bbg field name(s)
+        """
+
+        if isinstance(sids,str):
+            sids=[sids]
+        if isinstance(fields,str):
+            fields=[fields]
+
+        self.historicalDataFields=fields
+        self.historicalDataRequest = self.refDataService.createRequest("HistoricalDataRequest")
+
+        for item_name,item_value in zip(["securities","fields"],[sids,fields]):
+            for v in item_value:
+                self.historicalDataRequest.append(item_name,v)
+
+        self.historicalDataRequest.set("periodicitySelection", periodicity)
+        self.historicalDataRequest.set("startDate", start.strftime('%Y%m%d'))
+        self.historicalDataRequest.set("endDate", end.strftime('%Y%m%d'))
+
+        self.session.sendRequest(self.historicalDataRequest)
+        self.historicalDataEventLoop()
+
+
+
+from bqwidgets import NameValueTable,DatePicker
+import ipywidgets as widgets
+from IPython.display import display
+import bqviz as bqv
+import bqplot as bqp
+import pandas as pd
+from datetime import date,datetime,timedelta
+from bqviz.base_plots import VBox,HBox,LinePlot,BB_CLRS,Layout,BQV_LAYOUTS
+
+date_format='%m/%d/%Y'
+input_from = DatePicker(description='From',
+                       value=(date(date.today().year-1,date.today().month,date.today().day)-timedelta(days=1)).strftime(date_format),
+                       min_date=(date.today()-timedelta(days=365*5)).strftime(date_format),
+                       max_date=(date.today()-timedelta(days=7)).strftime(date_format),
+                       date_format=date_format)
+input_to = DatePicker(description='To',
+                      value=date(1900,1,1).strftime(date_format),
+                     min_date=(date.today()-timedelta(days=365*5-7)).strftime(date_format),
+                     date_format=date_format)
+dates_box=widgets.HBox([input_from,input_to])
+half_life=widgets.IntText(
+                        value=20,
+                        description='Half Life ( business days):',
+                        disabled=False,
+                        style={'description_width': 'initial'}
+)
+
+
+data_btn=widgets.Button(description='Reload Data')
+data_btn.layout.width = '350px'
+period_btns=[widgets.Button(description=str(m) + ' M') for m in [1,2,3,6,12,24,36,60]]
+message_area=widgets.Label(' ')
+message_area.layout.width = '350px'
+period_box=widgets.HBox(period_btns + [widgets.Label(' '),data_btn ,message_area])
+period_box.layout.width = '775px'
+main_box = widgets.VBox([half_life  , widgets.Label(' '), dates_box , widgets.Label(' ')  ,period_box ])
+
+def set_date_range(b):
+
+    m=int(b.description.split(' ')[0])
+
+    latest_date=pbr.index[-1]
+    input_to.value=(latest_date).strftime(date_format)
+
+    if m==1:
+        input_from.value=(latest_date-timedelta(days=31)).strftime(date_format)
+    elif m==2:
+        input_from.value=(latest_date-timedelta(days=61)).strftime(date_format)
+    elif m==3:
+        input_from.value=(latest_date-timedelta(days=92)).strftime(date_format)
+    elif m==6:
+        input_from.value=(latest_date-timedelta(days=183)).strftime(date_format)
+    elif m==12:
+        input_from.value=(latest_date-timedelta(days=365)).strftime(date_format)
+    elif m==24:
+        input_from.value=(latest_date-timedelta(days=365*2)).strftime(date_format)
+    elif m==36:
+        input_from.value=(latest_date-timedelta(days=365*3+1)).strftime(date_format)
+    elif m==60:
+        input_from.value=(latest_date-timedelta(days=365*5+1)).strftime(date_format)
+    else:
+        pass
+
+def update_charts():
+
+    date_from_chart=datetime.strptime(input_from.value,date_format).date()
+    date_to_chart=datetime.strptime(input_to.value,date_format).date()
+
+    date_range=[date_from_chart <= d <= date_to_chart for d in pbr.index]
+
+    pbr_sec=pbr.loc[:,tpx500]
+
+    relative_pbr=pbr_sec.divide(pbr.loc[:,'TPX Index'].copy(),axis=0)
+    relative_pbr.index=relative_pbr.index.map(lambda d:pd.Timestamp(d))
+
+    #グラフの更新
+    ma=relative_pbr.ewm(halflife=half_life.value).mean()
+    sgm=relative_pbr.ewm(halflife=half_life.value).std()
+
+    sorted_index=((relative_pbr-ma)/sgm).iloc[-1].sort_values().index
+
+    rows=[]
+    for l in range(25):
+
+        charts=[]
+        for s in [-1,1]:
+
+            if s==1:
+                i=sorted_index[l]
+            else:
+                i=sorted_index[-1-l]
+
+            desc=i.replace('JT Equity','')  + ' : '  + ref_data.loc[i,'NAME_KANJI'] + '    ' + format(int(ref_data.loc[i,'CUR_MKT_CAP']/1e8),',d') + ' 億円'
+
+            df_list=[relative_pbr.loc[date_range,i]]
+
+            for n in [-2,-1,1,2]:
+                df_list.append((ma+n*sgm).loc[date_range,i])
+
+            aggregated=pd.concat(df_list,axis=1)
+            aggregated.columns=['relative_pbr','▲2σ','▲1σ','+1σ','+2σ']
+            c=bqv.LinePlot(aggregated,legend=None,
+                           colors=['white','lime','royalblue','royalblue','lime'],
+                           title=desc)
+            charts.append(c.show())
+        rows.append(widgets.HBox(charts))
+    charts_box=widgets.VBox(rows)
+
+    main_box.children = [half_life  , widgets.Label(' '), dates_box , widgets.Label(' ')  ,period_box  , charts_box]
+
+def on_change(change):
+    if change['type'] == 'change' and change['name'] == 'value':
+        try:
+            update_charts()
+        except:
+            pass
+
+def update_data(_):
+
+    message_area.value='Loading.....'
+
+    #メインの処理開始
+    global mybbg,tpx500,pbr,ref_data
+    mybbg=bbgRequest()
+    mybbg.sendReferenceDataRequest('TPX500 Index','indx_members')
+    tpx500=[code+ ' Equity' for code in mybbg.referenceDataResults.data[0][2]]
+
+    #属性
+    mybbg.referenceDataResults.clear()
+    mybbg.sendReferenceDataRequest(tpx500,['CUR_MKT_CAP','NAME_KANJI'])
+    ref_data=mybbg.referenceDataResults.as_frame().pivot(index='security',columns='field',values='value')
+    ref_data=ref_data.sort_values(by='CUR_MKT_CAP',ascending=False)
+
+
+    #期間
+    date_from_data=(date.today()-timedelta(days=365*6))
+    date_to_data=date.today()
+
+    #TPX500全銘柄の日次トータルリターンを取得
+    mybbg.sendHistoricalDataRequest(tpx500+['TPX Index'],'PX_TO_BOOK_RATIO',start=date_from_data,end=date_to_data)
+    pbr=mybbg.historicalDataResults.as_frame().pivot(index='date',columns='security',values='value').fillna(method='ffill')
+
+    last_date=(pbr.index[-1]).strftime(date_format)
+    if last_date==input_to.value:
+        update_charts()
+    else:
+        #on_change_datesに繋がる
+        input_to.value=last_date
+
+    message_area.value=''
+
+
+update_data(0)
+input_to.observe(on_change)
+input_from.observe(on_change)
+half_life.observe(on_change)
+
+data_btn.on_click(update_data)
+for b in period_btns:
+    b.on_click(set_date_range)
+
+display(main_box)
+update_charts()
