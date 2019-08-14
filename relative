@@ -1,0 +1,552 @@
+import blpapi
+import pandas as pd
+import numpy as np
+from datetime import date,datetime,timedelta
+
+BAR_DATA = blpapi.Name("barData")
+BAR_TICK_DATA = blpapi.Name("barTickData")
+OPEN = blpapi.Name("open")
+HIGH = blpapi.Name("high")
+LOW = blpapi.Name("low")
+CLOSE = blpapi.Name("close")
+VOLUME = blpapi.Name("volume")
+NUM_EVENTS = blpapi.Name("numEvents")
+TIME = blpapi.Name("time")
+RESPONSE_ERROR = blpapi.Name("responseError")
+SESSION_TERMINATED = blpapi.Name("SessionTerminated")
+CATEGORY = blpapi.Name("category")
+MESSAGE = blpapi.Name("message")
+SECURITY = blpapi.Name("security")
+SECURITY_DATA = blpapi.Name("securityData")
+FIELD_DATA = blpapi.Name("fieldData")
+
+class bbgRequest():
+
+    #Results
+    class bbgResultsClass():
+        def __init__(self):
+            self.data=[]
+        def as_frame(self):
+            return pd.DataFrame(self.data,columns=self.columns)
+        def clear(self):
+            self.data=[]
+
+    class intradayBarResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','time', 'open', 'high', 'low', 'close','numEvents', 'volume']
+
+    class referenceDataResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','field', 'value']
+
+    class historicalDataResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','date','field', 'value']
+
+    def __init__(self):
+
+        sessionOptions = blpapi.SessionOptions()
+        sessionOptions.setServerHost("localhost")
+        sessionOptions.setServerPort(8194)
+
+
+        # Create a Session
+        self.session = blpapi.Session(sessionOptions)
+        self.intradayBarResults=self.intradayBarResultsClass()
+        self.referenceDataResults=self.referenceDataResultsClass()
+        self.historicalDataResults=self.historicalDataResultsClass()
+
+        # Start a Session
+        if not self.session.start():
+            print("Failed to start session.")
+            return
+
+        try:
+            # Open service to get historical data from
+            if not self.session.openService("//blp/refdata"):
+                print("Failed to open //blp/refdata")
+                return
+
+            self.refDataService = self.session.getService("//blp/refdata")
+
+        except:
+            print("Failed to get service")
+            return
+
+    def __del__(self):
+
+        self.session.stop()
+
+    def clearAll(self):
+        self.referenceDataResults.clear()
+        self.intradayBarResults.clear()
+
+    def printErrorInfo(self,leadingStr, errorInfo):
+        print("%s%s (%s)" % (leadingStr, errorInfo.getElementAsString(CATEGORY),
+                             errorInfo.getElementAsString(MESSAGE)))
+
+    def processIntradayBarResponseEvent(self,event,sid):
+        for msg in event:
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            data = msg.getElement(BAR_DATA).getElement(BAR_TICK_DATA)
+
+            for bar in data.values():
+                time = bar.getElementAsDatetime(TIME)
+                open = bar.getElementAsFloat(OPEN)
+                high = bar.getElementAsFloat(HIGH)
+                low = bar.getElementAsFloat(LOW)
+                close = bar.getElementAsFloat(CLOSE)
+                numEvents = bar.getElementAsInteger(NUM_EVENTS)
+                volume = bar.getElementAsInteger(VOLUME)
+                self.intradayBarResults.data.append([sid,time, open, high, low, close,numEvents, volume])
+
+    def processSecurity(self,sid):
+
+        self.intradayBarRequest.set("security",sid)
+        #print("Sending Request:", self.intradayBarRequest.getElement(SECURITY).getValue())
+        self.session.sendRequest(self.intradayBarRequest)
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processIntradayBarResponseEvent(event,sid)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processIntradayBarResponseEvent(event,sid)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendIntradayBarRequest(self,sids,start=date.today(),end=datetime.today()+timedelta(days=1),event='TRADE',interval=1):
+
+        """
+        Parameters
+        ----------
+        start : times are in GMT.
+        end   : times are in GMT.
+        events: [TRADE, BID, ASK, BID_BEST, ASK_BEST, BEST_BID, BEST_ASK]
+        interval: int, between 1 and 1440 in minutes. If omitted, defaults to 1 minute
+        """
+
+        self.intradayBarRequest = self.refDataService.createRequest("IntradayBarRequest")
+
+        self.intradayBarRequest.set('eventType', event)
+        self.intradayBarRequest.set('startDateTime', start)
+        self.intradayBarRequest.set('endDateTime', end)
+        self.intradayBarRequest.set('interval', interval)
+
+        # Open service to get historical data from
+        if isinstance(sids,str):
+            self.processSecurity(sids)
+
+        else:
+            if hasattr(sids, "__iter__"):
+                for s in sids:
+                    self.processSecurity(s)
+
+    def processReferenceDataResponseEvent(self,event):
+        for msg in event:
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            securities=msg.getElement('securityData')
+            for s in securities.values():
+                ticker=s.getElementValue('security')
+                field_data=s.getElement('fieldData')
+                for f in self.referenceDataFields:
+                    field_value=[]
+                    if field_data.hasElement(f):
+
+                        for v in field_data.getElement(f).values():
+
+                            if isinstance(v,blpapi.element.Element):
+                                for e in v.elements():
+                                    for v2 in v.getElement(e.name()).values():
+                                        field_value.append(v2)
+                            else:
+                                field_value.append(v)
+
+                        if len(field_value)==1:
+                            field_value=field_value[0]
+
+                    else:
+                        field_value=np.nan
+
+                    self.referenceDataResults.data.append([ticker,f,field_value])
+
+    def referenceDataEventLoop(self):
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processReferenceDataResponseEvent(event)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processReferenceDataResponseEvent(event)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendReferenceDataRequest(self,sids,fields):
+
+        """
+        Parameters
+        ----------
+        sids  : bbg security identifier(s)
+        fields: bbg field name(s)
+        """
+
+        if isinstance(sids,str):
+            sids=[sids]
+        if isinstance(fields,str):
+            fields=[fields]
+
+        self.referenceDataFields=fields
+        self.referenceDataRequest = self.refDataService.createRequest("ReferenceDataRequest")
+
+        for item_name,item_value in zip(["securities","fields"],[sids,fields]):
+            for v in item_value:
+                self.referenceDataRequest.append(item_name,v)
+
+        self.session.sendRequest(self.referenceDataRequest)
+        self.referenceDataEventLoop()
+
+
+    def processHistoricalDataResponseEvent(self,event):
+
+        for msg in event:
+
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            security=msg.getElement('securityData')
+            ticker=security.getElementValue('security')
+            field_data=security.getElement('fieldData')
+            for row in field_data.values():
+                date=row.getElementValue('date')
+                for f in self.historicalDataFields:
+                    field_value=[]
+                    if row.hasElement(f):
+
+                        field_value=row.getElementValue(f)
+
+                    else:
+                        field_value=np.nan
+
+                    self.historicalDataResults.data.append([ticker,date,f,field_value])
+
+    def historicalDataEventLoop(self):
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processHistoricalDataResponseEvent(event)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processHistoricalDataResponseEvent(event)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendHistoricalDataRequest(self,sids,fields,start=date.today()-timedelta(days=365),end=date.today(),periodicity='DAILY'):
+
+        """
+        Parameters
+        ----------
+        sids  : bbg security identifier(s)
+        fields: bbg field name(s)
+        """
+
+        if isinstance(sids,str):
+            sids=[sids]
+        if isinstance(fields,str):
+            fields=[fields]
+
+        self.historicalDataFields=fields
+        self.historicalDataRequest = self.refDataService.createRequest("HistoricalDataRequest")
+
+        for item_name,item_value in zip(["securities","fields"],[sids,fields]):
+            for v in item_value:
+                self.historicalDataRequest.append(item_name,v)
+
+        self.historicalDataRequest.set("periodicitySelection", periodicity)
+        self.historicalDataRequest.set("startDate", start.strftime('%Y%m%d'))
+        self.historicalDataRequest.set("endDate", end.strftime('%Y%m%d'))
+
+        self.session.sendRequest(self.historicalDataRequest)
+        self.historicalDataEventLoop()
+
+
+from bqwidgets import AutoComplete,DatePicker
+import ipywidgets as widgets
+from IPython.display import display
+import bqviz as bqv
+import pandas as pd
+from datetime import date,timedelta
+from bqviz.base_plots import VBox,HBox,LinePlot,BB_CLRS,Layout,BQV_LAYOUTS
+
+date_format='%m/%d/%Y'
+input_from = DatePicker(description='From',
+                       value=(date(date.today().year-1,date.today().month,date.today().day)-timedelta(days=1)).strftime(date_format),
+                       min_date=(date.today()-timedelta(days=365*5)).strftime(date_format),
+                       max_date=(date.today()-timedelta(days=7)).strftime(date_format),
+                       date_format=date_format)
+input_to = DatePicker(description='To',
+                      value=(date.today()).strftime(date_format),
+                     min_date=(date.today()-timedelta(days=365*5-7)).strftime(date_format),
+                     date_format=date_format)
+dates_box=widgets.HBox([input_from,input_to])
+
+period_btns=[widgets.Button(description=str(m) + ' M') for m in [1,2,3,6,12,36,60]]
+period_box=widgets.HBox(period_btns)
+period_box.layout.width = '400px'
+
+#TOPIX500構成銘柄を取得
+mybbg=bbgRequest()
+mybbg.sendReferenceDataRequest('TPX500 Index','indx_members')
+tpx500=[code+ ' Equity' for code in mybbg.referenceDataResults.data[0][2]]
+ticker_ac = AutoComplete(data=list(tpx500), max_results=5)
+button_run = widgets.Button(description='Run')
+main_box = widgets.VBox([ticker_ac , button_run ,widgets.Label(' '),dates_box,widgets.Label(' '),period_box])
+
+
+#横向きに並べたかったので、GridPlotを継承したクラスを自作した
+class HorizontalGridPlot(bqv.GridPlot):
+
+    """ Returns a grid containing a plot for each column of the provided
+    dataframe.
+
+    Parameters
+    ----------
+    df: Pandas dataframe
+        The dataframe to be plotted.
+    plots: object reference or list of references. (default='LinePlot')
+        The provided reference must be an object that is able to be displayed
+        in the GridPlot. If one reference is given, all plots will default to
+        that type. If a list of plots is provided, they will be assigned to
+        each column in the dataframe by index number.
+    cols: Integer (default=3)
+        The number of columns for the results to be displayed in.
+    colors: list of strings (default=BB_CLRS)
+        Colors to pass down to the subfigures. Only the first index is used.
+    heights: list of strings (default=None) (example: '75%' or '200px')
+        A list of heights for each column.
+    widths: list of strings (default=None) (example: '75%' or '200px')
+        A list of widths for each column.
+    tick_format: string (default=None)
+        The tick format for the Y axis. Example: '0.2f'
+
+    """
+
+    def __init__(self, df, plots=LinePlot, cols=3, colors=BB_CLRS,
+                 widths=None, tick_format=None,
+                 convert_dates=False, heights=None):
+
+        self._colors = colors
+        self._cols = cols
+        self._num_data_cols = len(df.columns)
+        self._num_data_rows = len(df)
+        self._convert_dates = convert_dates
+        self._heights = heights
+        self._is_subplot = False
+        self._figures = []
+        self._legenddisplay = None
+        self._tick_format = tick_format
+        self._send_log = True
+        self._widths = widths
+
+        self._plots = plots
+
+        self._make_figure(df, plots)
+
+        # Validate heights/widths
+        self._validate_grid_settings()
+
+        # Send log
+        self._log('bqviz.GridPlot')
+
+    def _divide_list(self, lst, col=1):
+        length = len(lst)
+        return [lst[i*col: (i+1)*col] for i in range(int(length/col)+1)]
+
+    def show(self):
+        """Create Boxes and display plots"""
+
+        if self._cols == 1:
+            return VBox([x.show() for x in self._figures])
+
+        else:
+            # Divide plot list into columns
+            rows = self._divide_list([x.show() for x in self._figures], self._cols)
+            hboxes = [HBox(children=x,
+                           layout=Layout(width='{}%'.format((100*len(x) // self._cols)))) for x in rows]
+
+            if self._widths:
+                for i in range(len(self._widths)):
+                    # Set width on BQPlot figure
+                    vboxes[i].layout.width = self._widths[i]
+
+            if self._heights:
+                for i in range(len(self._heights)):
+                    for box in vboxes:
+                        # Check if box exists (every column may not have same
+                        # number of boxes)
+                        if i < len(box.children):
+                            # Set height on BQPlot figure
+                            box.children[i].layout.height = self._heights[i]
+
+            return VBox(hboxes, layout=BQV_LAYOUTS['full_width'])
+
+def set_date_range(b):
+
+    m=int(b.description.split(' ')[0])
+
+    latest_date=relative_prices.index[-1]
+    input_to.value=(latest_date).strftime(date_format)
+
+    if m==1:
+        input_from.value=(latest_date-timedelta(days=31)).strftime(date_format)
+    elif m==2:
+        input_from.value=(latest_date-timedelta(days=61)).strftime(date_format)
+    elif m==3:
+        input_from.value=(latest_date-timedelta(days=92)).strftime(date_format)
+    elif m==6:
+        input_from.value=(latest_date-timedelta(days=183)).strftime(date_format)
+    elif m==12:
+        input_from.value=(latest_date-timedelta(days=365)).strftime(date_format)
+    elif m==24:
+        input_from.value=(latest_date-timedelta(days=365*2)).strftime(date_format)
+    elif m==36:
+        input_from.value=(latest_date-timedelta(days=365*3+1)).strftime(date_format)
+    elif m==60:
+        input_from.value=(latest_date-timedelta(days=365*5+1)).strftime(date_format)
+    else:
+        pass
+
+def update_charts():
+
+    date_from_chart=datetime.strptime(input_from.value,date_format).date()
+    date_to_chart=datetime.strptime(input_to.value,date_format).date()
+    date_range=[date_from_chart <= d <= date_to_chart for d in relative_prices.index]
+
+    #グラフの更新
+    temp=relative_prices.iloc[date_range,1:]
+    temp=temp.iloc[:]/temp.iloc[0]*100
+
+    target=relative_prices.iloc[date_range,0:1]
+
+    target.index=target.index.map(pd.Timestamp)
+    temp.index=temp.index.map(pd.Timestamp)
+
+    target_chart=widgets.Box([LinePlot(target).show()])
+    charts=widgets.Box([HorizontalGridPlot(temp,cols=3).show()])
+    main_box.children = [ticker_ac , button_run ,widgets.Label(' '),dates_box,widgets.Label(' '),period_box, target_chart , charts]
+
+def on_change_dates(change):
+
+    if change['type'] == 'change' and change['name'] == 'value':
+        try:
+            update_charts()
+        except:
+            print('error')
+
+# Define a function to generate the UI widgets when the Run button is clicked
+def button_run_on_click(_):
+
+    if ticker_ac.value!='':
+
+        #入力したTickerから業種インデックスコードを取得
+        mybbg.sendReferenceDataRequest(ticker_ac.value,'industry_group_index')
+        industry=mybbg.referenceDataResults.data[-1][-1]
+
+        #業種インデックスコードから、メンバーを取得
+        mybbg.referenceDataResults.clear()
+        mybbg.sendReferenceDataRequest(industry + ' Index','indx_members')
+        universe=[code+ ' Equity' for code in mybbg.referenceDataResults.data[-1][-1]]
+        universe=list(filter(lambda a: a in tpx500,universe))
+
+        #名称と時価総額を取得
+        mybbg.referenceDataResults.clear()
+        mybbg.sendReferenceDataRequest(universe,['CUR_MKT_CAP','NAME_KANJI'])
+        descriptions=mybbg.referenceDataResults.as_frame().pivot(index='security',columns='field',values='value')
+        descriptions.sort_values(by='CUR_MKT_CAP',ascending=False)
+
+        #ヒストリカル
+        date_from_data=(date.today()-timedelta(days=365*5))
+        date_to_data=date.today()
+
+        mybbg.historicalDataResults.clear()
+        mybbg.sendHistoricalDataRequest(universe,'PX_LAST',date_from_data,date_to_data)
+        prices=mybbg.historicalDataResults.as_frame().pivot(index='date',columns='security',values='value')
+        target=prices.loc[:,ticker_ac.value]
+        labels=[]
+        for element in prices.columns:
+
+            desc=descriptions.loc[element]
+            if element==ticker_ac.value:
+                is_self=1
+
+            else:
+                is_self=0
+
+            label=element.replace('JT Equity','')  + ' : '  + desc.loc['NAME_KANJI'] + '    ' + format(int(desc.loc['CUR_MKT_CAP']/1e8),',d') + ' 億円'
+            labels.append((is_self,desc.loc['CUR_MKT_CAP'],label))
+
+        prices.columns=pd.MultiIndex.from_tuples(labels, names=['is_self','MCAP', 'descriptions'])
+        prices=prices.sort_index(axis=1,level=[0,1],ascending=False)
+        prices.columns=prices.columns.get_level_values(2)
+
+        global relative_prices
+        relative_prices=pd.DataFrame()
+        relative_prices=(1/prices).multiply(target,axis=0)
+
+        #自分のプライスは相対ではなく元データにする
+        relative_prices.iloc[:,0]=target
+
+        #最新データ
+        latest_date=relative_prices.index[-1]
+        input_to.value=(latest_date).strftime(date_format)
+
+    #グラフの更新
+    update_charts()
+
+input_to.observe(on_change_dates)
+input_from.observe(on_change_dates)
+for b in period_btns:
+    b.on_click(set_date_range)
+
+# Update all data, charts, and the data grid when a users clicks the Run button
+button_run.on_click(button_run_on_click)
+display(main_box)
