@@ -1,0 +1,317 @@
+import blpapi
+import pandas as pd
+import numpy as np
+from datetime import date,datetime,timedelta
+
+BAR_DATA = blpapi.Name("barData")
+BAR_TICK_DATA = blpapi.Name("barTickData")
+OPEN = blpapi.Name("open")
+HIGH = blpapi.Name("high")
+LOW = blpapi.Name("low")
+CLOSE = blpapi.Name("close")
+VOLUME = blpapi.Name("volume")
+NUM_EVENTS = blpapi.Name("numEvents")
+TIME = blpapi.Name("time")
+RESPONSE_ERROR = blpapi.Name("responseError")
+SESSION_TERMINATED = blpapi.Name("SessionTerminated")
+CATEGORY = blpapi.Name("category")
+MESSAGE = blpapi.Name("message")
+SECURITY = blpapi.Name("security")
+SECURITY_DATA = blpapi.Name("securityData")
+FIELD_DATA = blpapi.Name("fieldData")
+
+class bbgRequest():
+
+    #Results
+    class bbgResultsClass():
+        def __init__(self):
+            self.data=[]
+        def as_frame(self):
+            return pd.DataFrame(self.data,columns=self.columns)
+        def clear(self):
+            self.data=[]
+
+    class intradayBarResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','time', 'open', 'high', 'low', 'close','numEvents', 'volume']
+
+    class referenceDataResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','field', 'value']
+
+    class historicalDataResultsClass(bbgResultsClass):
+        def __init__(self):
+            self.data=[]
+            self.columns=['security','date','field', 'value']
+
+    def __init__(self):
+
+        sessionOptions = blpapi.SessionOptions()
+        sessionOptions.setServerHost("localhost")
+        sessionOptions.setServerPort(8194)
+
+
+        # Create a Session
+        self.session = blpapi.Session(sessionOptions)
+        self.intradayBarResults=self.intradayBarResultsClass()
+        self.referenceDataResults=self.referenceDataResultsClass()
+        self.historicalDataResults=self.historicalDataResultsClass()
+
+        # Start a Session
+        if not self.session.start():
+            print("Failed to start session.")
+            return
+
+        try:
+            # Open service to get historical data from
+            if not self.session.openService("//blp/refdata"):
+                print("Failed to open //blp/refdata")
+                return
+
+            self.refDataService = self.session.getService("//blp/refdata")
+
+        except:
+            print("Failed to get service")
+            return
+
+    def __del__(self):
+
+        self.session.stop()
+
+    def clearAll(self):
+        self.referenceDataResults.clear()
+        self.intradayBarResults.clear()
+        self.historicalDataResults.clear()
+
+    def printErrorInfo(self,leadingStr, errorInfo):
+        print("%s%s (%s)" % (leadingStr, errorInfo.getElementAsString(CATEGORY),
+                             errorInfo.getElementAsString(MESSAGE)))
+
+    def processIntradayBarResponseEvent(self,event,sid):
+        for msg in event:
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            data = msg.getElement(BAR_DATA).getElement(BAR_TICK_DATA)
+
+            for bar in data.values():
+                time = bar.getElementAsDatetime(TIME)
+                open = bar.getElementAsFloat(OPEN)
+                high = bar.getElementAsFloat(HIGH)
+                low = bar.getElementAsFloat(LOW)
+                close = bar.getElementAsFloat(CLOSE)
+                numEvents = bar.getElementAsInteger(NUM_EVENTS)
+                volume = bar.getElementAsInteger(VOLUME)
+                self.intradayBarResults.data.append([sid,time, open, high, low, close,numEvents, volume])
+
+    def processSecurity(self,sid):
+
+        self.intradayBarRequest.set("security",sid)
+        #print("Sending Request:", self.intradayBarRequest.getElement(SECURITY).getValue())
+        self.session.sendRequest(self.intradayBarRequest)
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processIntradayBarResponseEvent(event,sid)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processIntradayBarResponseEvent(event,sid)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendIntradayBarRequest(self,sids,start=date.today(),end=datetime.today()+timedelta(days=1),event='TRADE',interval=1):
+
+        """
+        Parameters
+        ----------
+        start : times are in GMT.
+        end   : times are in GMT.
+        events: [TRADE, BID, ASK, BID_BEST, ASK_BEST, BEST_BID, BEST_ASK]
+        interval: int, between 1 and 1440 in minutes. If omitted, defaults to 1 minute
+        """
+
+        self.intradayBarRequest = self.refDataService.createRequest("IntradayBarRequest")
+
+        self.intradayBarRequest.set('eventType', event)
+        self.intradayBarRequest.set('startDateTime', start)
+        self.intradayBarRequest.set('endDateTime', end)
+        self.intradayBarRequest.set('interval', interval)
+
+        # Open service to get historical data from
+        if isinstance(sids,str):
+            self.processSecurity(sids)
+
+        else:
+            if hasattr(sids, "__iter__"):
+                for s in sids:
+                    self.processSecurity(s)
+
+    def processReferenceDataResponseEvent(self,event):
+        for msg in event:
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            securities=msg.getElement('securityData')
+            for s in securities.values():
+                ticker=s.getElementValue('security')
+                field_data=s.getElement('fieldData')
+                for f in self.referenceDataFields:
+                    field_value=[]
+                    if field_data.hasElement(f):
+
+                        for v in field_data.getElement(f).values():
+
+                            if isinstance(v,blpapi.element.Element):
+                                for e in v.elements():
+                                    for v2 in v.getElement(e.name()).values():
+                                        field_value.append(v2)
+                            else:
+                                field_value.append(v)
+
+                        if len(field_value)==1:
+                            field_value=field_value[0]
+
+                    else:
+                        field_value=np.nan
+
+                    self.referenceDataResults.data.append([ticker,f,field_value])
+
+    def referenceDataEventLoop(self):
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processReferenceDataResponseEvent(event)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processReferenceDataResponseEvent(event)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendReferenceDataRequest(self,sids,fields,optional_parameters={}):
+
+        """
+        Parameters
+        ----------
+        sids  : bbg security identifier(s)
+        fields: bbg field name(s)
+        """
+
+        if isinstance(sids,str):
+            sids=[sids]
+        if isinstance(fields,str):
+            fields=[fields]
+
+        self.referenceDataFields=fields
+        self.referenceDataRequest = self.refDataService.createRequest("ReferenceDataRequest")
+
+        for item_name,item_value in zip(["securities","fields"],[sids,fields]):
+            for v in item_value:
+                self.referenceDataRequest.append(item_name,v)
+
+        if len(optional_parameters)>0:
+            overrides=self.referenceDataRequest.getElement("overrides")
+            for key,value in optional_parameters.items():
+                ovrrd=overrides.appendElement()
+                ovrrd.setElement("fieldId", key)
+                ovrrd.setElement("value", value)
+
+        self.session.sendRequest(self.referenceDataRequest)
+        self.referenceDataEventLoop()
+
+
+    def processHistoricalDataResponseEvent(self,event):
+
+        for msg in event:
+
+            if msg.hasElement(RESPONSE_ERROR):
+                self.printErrorInfo("REQUEST FAILED: ", msg.getElement(RESPONSE_ERROR))
+                continue
+
+            security=msg.getElement('securityData')
+            ticker=security.getElementValue('security')
+            field_data=security.getElement('fieldData')
+            for row in field_data.values():
+                date=row.getElementValue('date')
+                for f in self.historicalDataFields:
+                    field_value=[]
+                    if row.hasElement(f):
+
+                        field_value=row.getElementValue(f)
+
+                    else:
+                        field_value=np.nan
+
+                    self.historicalDataResults.data.append([ticker,date,f,field_value])
+
+    def historicalDataEventLoop(self):
+
+        done = False
+        while not done:
+            # nextEvent() method below is called with a timeout to let
+            # the program catch Ctrl-C between arrivals of new events
+            event = self.session.nextEvent(500)
+
+            if event.eventType() == blpapi.Event.PARTIAL_RESPONSE:
+                #print("Processing Partial Response")
+                self.processHistoricalDataResponseEvent(event)
+            elif event.eventType() == blpapi.Event.RESPONSE:
+                #print("Processing Response")
+                self.processHistoricalDataResponseEvent(event)
+                done = True
+            else:
+                for msg in event:
+                    if event.eventType() == blpapi.Event.SESSION_STATUS:
+                        if msg.messageType() == SESSION_TERMINATED:
+                            done = True
+
+    def sendHistoricalDataRequest(self,sids,fields,start=date.today()-timedelta(days=365),end=date.today(),periodicity='DAILY'):
+
+        """
+        Parameters
+        ----------
+        sids  : bbg security identifier(s)
+        fields: bbg field name(s)
+        """
+
+        if isinstance(sids,str):
+            sids=[sids]
+        if isinstance(fields,str):
+            fields=[fields]
+
+        self.historicalDataFields=fields
+        self.historicalDataRequest = self.refDataService.createRequest("HistoricalDataRequest")
+
+        for item_name,item_value in zip(["securities","fields"],[sids,fields]):
+            for v in item_value:
+                self.historicalDataRequest.append(item_name,v)
+
+        self.historicalDataRequest.set("periodicitySelection", periodicity)
+        self.historicalDataRequest.set("startDate", start.strftime('%Y%m%d'))
+        self.historicalDataRequest.set("endDate", end.strftime('%Y%m%d'))
+
+        self.session.sendRequest(self.historicalDataRequest)
+        self.historicalDataEventLoop()
